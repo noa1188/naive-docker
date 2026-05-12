@@ -1,0 +1,181 @@
+name: Publish Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      manualTag:
+        description: 'Image tag, for example v1.0.0'
+        required: true
+      pushLatest:
+        description: 'Also push latest tag'
+        required: true
+        default: true
+        type: boolean
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: yourdockerhubusername/naiveproxy-docker
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve target tag
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_VERSION=""
+          if [ "${{ github.event_name }}" = "release" ] && [ -n "${{ github.event.release.tag_name || '' }}" ]; then
+            TARGET_VERSION="${{ github.event.release.tag_name }}"
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.manualTag || '' }}" ]; then
+            TARGET_VERSION="${{ github.event.inputs.manualTag }}"
+          fi
+          if [ -z "$TARGET_VERSION" ]; then
+            echo "No target tag provided."
+            exit 1
+          fi
+          echo "target_version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Target version: $TARGET_VERSION"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.target_version }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_TAG="${{ steps.target.outputs.target_version }}"
+          echo "version_tag=${IMAGE_NAME}:${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+
+          PUSH_LATEST="false"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            PUSH_LATEST="true"
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PUSH_LATEST="${{ github.event.inputs.pushLatest }}"
+          fi
+
+          if [ "$PUSH_LATEST" = "true" ]; then
+            echo "latest_tag=${IMAGE_NAME}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest_tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get naiveproxy upstream version
+        id: naiveproxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAIVE_VERSION=$(curl -fsSL https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | jq -r .tag_name)
+          if [ -z "$NAIVE_VERSION" ] || [ "$NAIVE_VERSION" = "null" ]; then
+            echo "Failed to resolve naiveproxy upstream version"
+            exit 1
+          fi
+          echo "naive_version=${NAIVE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "${NAIVE_VERSION}" > NAIVEPROXY_VERSION
+          echo "Recorded naiveproxy upstream version: ${NAIVE_VERSION}"
+
+      - name: Upload naiveproxy version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: naiveproxy-version
+          path: NAIVEPROXY_VERSION
+
+      - name: Compute build metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build local test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: local/naiveproxy-docker:ci-test
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+            IMAGE_VERSION=${{ steps.target.outputs.target_version }}
+            NAIVEPROXY_UPSTREAM_VERSION=${{ steps.naiveproxy.outputs.naive_version }}
+
+      - name: Export build info
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          {
+            echo "Repository: ${{ github.repository }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Run: ${{ github.run_id }}"
+            echo "Target Tag: ${{ steps.target.outputs.target_version }}"
+            echo "Recorded naiveproxy upstream version: ${{ steps.naiveproxy.outputs.naive_version }}"
+            echo "Build date: ${{ steps.meta.outputs.build_date }}"
+            echo ""
+            echo "=== caddy version ==="
+            docker run --rm local/naiveproxy-docker:ci-test caddy version
+            echo ""
+            echo "=== caddy modules ==="
+            docker run --rm local/naiveproxy-docker:ci-test caddy list-modules
+            echo ""
+            echo "=== caddy build-info ==="
+            docker run --rm local/naiveproxy-docker:ci-test caddy build-info
+            echo ""
+            echo "=== image labels ==="
+            docker inspect local/naiveproxy-docker:ci-test | jq '.[0].Config.Labels'
+          } > output/build-info.txt
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: output/build-info.txt
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.version_tag }}
+            ${{ steps.tags.outputs.latest_tag }}
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+            IMAGE_VERSION=${{ steps.target.outputs.target_version }}
+            NAIVEPROXY_UPSTREAM_VERSION=${{ steps.naiveproxy.outputs.naive_version }}
+          labels: |
+            org.opencontainers.image.title=naiveproxy-docker
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.target.outputs.target_version }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.build_date }}
+            org.opencontainers.image.naiveproxy.upstream-version=${{ steps.naiveproxy.outputs.naive_version }}
