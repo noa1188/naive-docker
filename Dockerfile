@@ -23,14 +23,11 @@ LABEL org.opencontainers.image.title="naiveproxy-docker" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
-      org.opencontainers.image.source="https://github.com/RayWangQvQ/naiveproxy-docker" \
+      org.opencontainers.image.source="https://github.com/noa1188/naive-docker" \
       org.opencontainers.image.naiveproxy.upstream-version="${NAIVEPROXY_UPSTREAM_VERSION}"
 
 RUN set -eux; \
-    apt-get update; \
-    apt-get install --no-install-recommends -y bash tzdata; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/*
+    apk add --no-cache bash tzdata
 
 COPY --from=builder /out/caddy /usr/bin/caddy
 
