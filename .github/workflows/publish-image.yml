@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: yourdockerhubusername/naiveproxy-docker
+  IMAGE_NAME: rubio1/naiveproxy-docker
 
 jobs:
   publish:
