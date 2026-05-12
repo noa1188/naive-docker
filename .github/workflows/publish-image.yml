@@ -46,8 +46,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.target.outputs.target_version }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
